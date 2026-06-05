@@ -1,0 +1,89 @@
+# ═══════════════════════════════════════════
+# Ship Hull Agent — 全局配置文件
+# ═══════════════════════════════════════════
+
+# 对话模型
+llm:
+  model: "Qwen/Qwen3-VL-4B-AWQ"
+  api_key: "abc123"
+  base_url: "http://localhost:7890/v1"
+  temperature: 0.0
+
+# Embedding 模型
+embed:
+  model: "Qwen3-Embedding-0.6B"
+  api_key: "abc123"
+  base_url: "http://localhost:7891/v1"
+
+# RAG 检索参数
+retrieval:
+  top_k: 3
+  score_threshold: 0.5
+
+# 向量库配置
+vector_store:
+  persist_path: "./vector_store"
+  auto_rebuild: false
+
+# 数据库后端配置（csv 或 sqlite）
+database:
+  backend: "sqlite"
+  sqlite_path: "./data/ships.db"
+
+# 应用配置
+app:
+  log_level: "INFO"
+  ship_db_path: "./data/ships.csv"
+
+# Web 服务配置
+web:
+  host: "0.0.0.0"
+  port: 8000
+
+# 视频 Demo 配置
+demo_video:
+  dir: "./demovid"          # 视频存储目录
+  output_dir: "./demo_output"  # Demo 输出目录
+  allowed_extensions:
+    - ".mp4"
+    - ".avi"
+    - ".mkv"
+    - ".mov"
+    - ".flv"
+    - ".wmv"
+    - ".webm"
+  max_file_size_mb: 500     # 最大上传文件大小 (MB)
+
+# 摄像头 Demo 配置
+camera_demo:
+  stream_mode: "h264"        # 统一使用 H264 编码，与视频 Demo 逻辑一致
+
+# Pipeline 视频处理流水线配置
+pipeline:
+  concurrent_mode: true
+  target_fps: 0                # 主循环帧率上限（0=自动匹配源视频 FPS，建议 15-30）
+  max_concurrent: 4
+  max_queued_frames: 30
+  process_every_n_frames: 15
+  output_dir: "./output"
+  save_output_video: true      # 是否保存推理结果视频（true=保存到 demo_video.output_dir）
+  save_screenshots: true
+  prompt_mode: "detailed"
+  enable_refresh: false
+  skip_refresh_matched: false  # 开启后，精确匹配过的 track 不再参与定时刷新，只刷新未匹配的
+  gap_num: 150
+  demo: false
+  yolo_model: "yolov8n.engine"
+  device: "0"
+  conf_threshold: 0.25
+  detect_every_n_frames: 2
+  tracker: "bytetrack"
+  tracker_params:
+    track_high_thresh: 0.5
+    track_low_thresh: 0.05
+    new_track_thresh: 0.6
+    track_buffer: 90
+    match_thresh: 0.5
+  detect_classes:
+    - 8
+  max_stale_frames: 300
