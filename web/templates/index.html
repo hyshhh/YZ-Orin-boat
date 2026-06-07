@@ -282,17 +282,6 @@
             <span id="cameraStatusText">未启动</span>
           </div>
 
-          <!-- 浏览器摄像头预览 -->
-          <div class="form-row" id="browserCameraPreviewRow">
-            <div class="camera-preview-wrap">
-              <video id="browserCameraPreview" autoplay playsinline muted></video>
-              <div id="browserCameraPreviewPlaceholder" class="video-placeholder" style="min-height:200px">
-                <span>📷</span>
-                <p>点击"启动"后授权摄像头</p>
-              </div>
-            </div>
-          </div>
-
           <!-- 视频流输出 -->
           <div id="cameraOutput" class="camera-output">
             <video id="cameraStream" class="demo-video" autoplay muted playsinline style="display:none;max-width:100%;border-radius:8px;background:#000"></video>
@@ -309,11 +298,9 @@
           <h3 class="section-title">💡 使用说明</h3>
           <div class="help-content">
             <ul>
-              <li><strong>浏览器摄像头（默认）</strong>：直接调用浏览器 <code>getUserMedia</code> API，需 HTTPS 或 localhost 环境。服务端处理后通过 H264 编码推流到前端</li>
-              <li><strong>视频编码</strong>：统一使用 H264 编码 + WebSocket 推流，与视频 Demo 逻辑一致</li>
               <li><strong>服务器摄像头</strong>：直接读取服务器连接的 USB 摄像头（设备号 0, 1, …）</li>
               <li><strong>RTSP 流</strong>：填入地址，如 <code>rtsp://192.168.1.100/stream</code></li>
-              <li><strong>自定义</strong>：支持视频文件路径或任意 OpenCV 支持的输入源</li>
+              <li><strong>视频编码</strong>：统一使用 H264 编码 + WebSocket 推流，与视频 Demo 逻辑一致</li>
               <li>处理结果将保存到 <code>demo_output</code> 目录</li>
             </ul>
           </div>
@@ -331,10 +318,8 @@
               <label>输入源</label>
               <div class="input-group">
                 <select id="cameraSource" onchange="onCameraSourceChange()">
-                  <option value="browser">本地摄像头（浏览器）</option>
                   <option value="0">服务器摄像头 (0)</option>
                   <option value="rtsp">RTSP 流</option>
-                  <option value="custom">自定义</option>
                 </select>
                 <input type="text" id="cameraUrl" placeholder="rtsp://192.168.1.100/stream" style="display:none" />
               </div>

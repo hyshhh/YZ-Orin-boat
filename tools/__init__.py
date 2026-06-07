@@ -7,9 +7,7 @@ import json
 import logging
 import re
 
-import cv2
 import httpx
-import numpy as np
 
 from config import load_config
 
@@ -28,7 +26,7 @@ def _get_llm_cfg() -> dict:
     return _cached_llm_cfg
 
 
-def _vlm_infer(image_b64: str, prompt_mode: str = "detailed") -> dict:
+def _vlm_infer(image_b64: str, prompt_mode: str = "detailed", mime_type: str = "image/jpeg") -> dict:
     """
     调用 VLM 进行弦号识别，返回 {hull_number, description}。
 
@@ -83,7 +81,7 @@ def _vlm_infer(image_b64: str, prompt_mode: str = "detailed") -> dict:
                     {"type": "text", "text": prompt},
                     {
                         "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"},
+                        "image_url": {"url": f"data:{mime_type};base64,{image_b64}"},
                     },
                 ],
             }

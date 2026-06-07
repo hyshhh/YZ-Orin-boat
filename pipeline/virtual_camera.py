@@ -1,14 +1,11 @@
 """
-VirtualCamera — 从帧目录或内存队列读取最新 JPEG 帧
+VirtualCamera — 从帧目录或内存队列读取最新帧
 
 支持两种模式：
-1. 帧目录模式：从磁盘读取 latest.jpg（兼容旧架构）
+1. 帧目录模式：从磁盘读取 latest.jpg
 2. 内存队列模式：从 queue.Queue 直接读取 numpy 帧（零磁盘 I/O）
 
-配合浏览器摄像头 WebSocket 推流使用：
-- 前端 getUserMedia 捕获帧 → WebSocket 发送到服务器
-- 服务器解码后直接送入内存队列（或写入帧目录）
-- 本类从队列/目录读取帧，模拟 cv2.VideoCapture 接口
+本类从队列/目录读取帧，模拟 cv2.VideoCapture 接口
 """
 
 from __future__ import annotations

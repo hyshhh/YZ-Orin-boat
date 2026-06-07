@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import sqlite3
 from pathlib import Path
@@ -33,11 +32,6 @@ class SqlShipSource(ShipDataSource):
                 )
             """)
             conn.execute("""
-                CREATE TABLE IF NOT EXISTS ship_embeddings (
-                    hull_number TEXT PRIMARY KEY,
-                    embedding TEXT NOT NULL
-                )
-            """)
             conn.commit()
 
     def load_all(self) -> dict[str, str]:
@@ -79,7 +73,6 @@ class SqlShipSource(ShipDataSource):
             return False
         with self._connect() as conn:
             conn.execute("DELETE FROM ships WHERE hull_number = ?", (hull_number,))
-            conn.execute("DELETE FROM ship_embeddings WHERE hull_number = ?", (hull_number,))
             conn.commit()
         return True
 
@@ -120,25 +113,3 @@ class SqlShipSource(ShipDataSource):
         with self._connect() as conn:
             row = conn.execute("SELECT COUNT(*) as cnt FROM ships").fetchone()
             return row["cnt"]
-
-    # ── Embedding 操作 ──
-
-    def load_all_embeddings(self) -> dict[str, list[float]]:
-        with self._connect() as conn:
-            rows = conn.execute("SELECT hull_number, embedding FROM ship_embeddings").fetchall()
-            return {row["hull_number"]: json.loads(row["embedding"]) for row in rows}
-
-    def store_embeddings_bulk(self, records: dict[str, list[float]]) -> int:
-        with self._connect() as conn:
-            for hn, emb in records.items():
-                conn.execute(
-                    "INSERT OR REPLACE INTO ship_embeddings (hull_number, embedding) VALUES (?, ?)",
-                    (hn, json.dumps(emb)),
-                )
-            conn.commit()
-        return len(records)
-
-    def delete_embedding(self, hull_number: str) -> None:
-        with self._connect() as conn:
-            conn.execute("DELETE FROM ship_embeddings WHERE hull_number = ?", (hull_number,))
-            conn.commit()

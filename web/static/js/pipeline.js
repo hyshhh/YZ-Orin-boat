@@ -763,133 +763,36 @@ async function stopTaskById(taskId) {
 }
 
 // ═══════════════════════════════════════════
-// 摄像头 Demo（简化版：与视频 Demo 相同的 H264 推流逻辑）
+// 摄像头 Demo（简化版：仅支持服务器摄像头和RTSP流）
 // ═══════════════════════════════════════════
 
 let cameraTaskId = null;
 let cameraPollTimer = null;
-let browserCameraStream = null;   // MediaStream
-let browserCameraWs = null;       // WebSocket（兼容旧接口，实际不再使用）
-let browserCameraTimer = null;    // 帧捕获定时器（兼容旧接口）
-let browserCameraCanvas = null;   // 离屏 canvas（兼容旧接口）
-let browserCameraMediaRecorder = null; // H264 MediaRecorder（兼容旧接口）
-let browserCameraCaptureFps = 15; // 推帧帧率
 
 function onCameraSourceChange() {
   const sel = document.getElementById('cameraSource');
   if (!sel) return;
   const val = sel.value;
   const urlInput = document.getElementById('cameraUrl');
-  const previewRow = document.getElementById('browserCameraPreviewRow');
-  const streamModeRow = document.getElementById('camStreamModeRow');
-  const streamModeHint = document.getElementById('camStreamModeHint');
 
   if (urlInput) {
-    urlInput.style.display = (val === '0' || val === 'browser') ? 'none' : '';
+    urlInput.style.display = (val === '0') ? 'none' : '';
     if (val === 'rtsp') {
       urlInput.placeholder = 'rtsp://192.168.1.100/stream';
-    } else if (val === 'custom') {
-      urlInput.placeholder = '输入视频路径或 URL';
     }
   }
-
-  if (previewRow) {
-    previewRow.style.display = val === 'browser' ? '' : 'none';
-  }
-
-  // H264/MJPEG 切换仅对浏览器摄像头可见；非浏览器时显示提示
-  const isBrowser = val === 'browser';
-  if (streamModeRow) streamModeRow.style.display = isBrowser ? '' : 'none';
-  if (streamModeHint) streamModeHint.style.display = isBrowser ? 'none' : '';
 }
 
 function getCameraInput() {
   const sel = document.getElementById('cameraSource');
   if (!sel) return '';
   if (sel.value === '0') return '0';
-  if (sel.value === 'browser') return '__browser__';
   const urlInput = document.getElementById('cameraUrl');
   return urlInput ? urlInput.value.trim() : '';
 }
 
-// ── 浏览器摄像头：启动（简化版：直接启动后端 Pipeline，与视频 Demo 相同逻辑）──
-async function startBrowserCamera() {
-  const btn = document.getElementById('btnStartCamera');
-  btn.disabled = true;
-  btn.innerHTML = '<span class="loading-spinner"></span> 启动中...';
-
-  try {
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      throw new Error('当前页面不是安全上下文（需要 HTTPS 或 localhost），浏览器不允许访问摄像头');
-    }
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'environment' },
-      audio: false,
-    }).catch(err => {
-      if (err.name === 'NotAllowedError') throw new Error('摄像头权限被拒绝，请在浏览器弹窗中点击"允许"');
-      if (err.name === 'NotFoundError') throw new Error('未检测到摄像头设备，请确认电脑有可用摄像头');
-      if (err.name === 'NotReadableError') throw new Error('摄像头被其他程序占用，请关闭其他使用摄像头的应用');
-      throw new Error('摄像头访问失败: ' + err.message);
-    });
-    browserCameraStream = stream;
-
-    const preview = document.getElementById('browserCameraPreview');
-    const placeholder = document.getElementById('browserCameraPreviewPlaceholder');
-    if (preview) {
-      preview.srcObject = stream;
-      preview.style.display = '';
-    }
-    if (placeholder) placeholder.style.display = 'none';
-
-    // 启动后端 Pipeline（与视频 Demo 相同的 H264 推流逻辑）
-    const params = collectCameraParams();
-    const resp = await fetch(`${PIPE_API}/start-browser-camera`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        concurrent_mode: document.getElementById('camOptConcurrent').checked,
-        stream_mode: 'h264',  // 强制使用 H264 模式，与视频 Demo 一致
-        ...params,
-      }),
-    });
-    const data = await resp.json();
-    if (!resp.ok) throw new Error(data.detail || '启动失败');
-
-    cameraTaskId = data.task_id;
-    browserCameraCaptureFps = data.capture_fps || 15;
-
-    // 与视频 Demo 相同：H264 WebSocket + MSE 播放
-    connectCameraH264(cameraTaskId);
-    startCameraPolling();
-
-    showToast('摄像头已连接，开始推流');
-    updateCameraStatus('running', 'H264 推流中...');
-    document.getElementById('btnStartCamera').style.display = 'none';
-    document.getElementById('btnStopCamera').style.display = '';
-
-  } catch (e) {
-    showToast('启动失败: ' + e.message, 'error');
-    stopBrowserCamera();
-  } finally {
-    btn.disabled = false;
-    btn.innerHTML = '▶ 启动摄像头识别';
-  }
-}
-
-// ── 兼容旧接口（已废弃，保留空实现）──
-function setupMjpegCameraWs() { console.warn('MJPEG 模式已废弃，使用 H264 模式'); }
-function setupH264CameraWs() { console.warn('H264 上传模式已废弃，使用后端推流'); }
-function setupWebRTCCamera() { console.warn('WebRTC 模式已废弃，使用 H264 模式'); }
-function startFrameCapture() {}
-function stopFrameCapture() {}
-
 async function startCameraPipeline() {
   const input = getCameraInput();
-
-  if (input === '__browser__') {
-    await startBrowserCamera();
-    return;
-  }
 
   if (!input) { showToast('请输入摄像头地址', 'error'); return; }
 
@@ -925,7 +828,7 @@ async function startCameraPipeline() {
     document.getElementById('btnStopCamera').style.display = '';
     showToast('摄像头 Pipeline 已启动');
 
-    // 与视频 Demo 相同：H.264 WebSocket + MSE 播放
+    // H.264 WebSocket + MSE 播放
     connectCameraH264(cameraTaskId);
 
     startCameraPolling();
@@ -943,8 +846,6 @@ async function stopCameraPipeline() {
   // 立即停止轮询，防止后续 pollCameraStatus 干扰新任务
   stopCameraPolling();
   cameraTaskId = null;
-
-  stopFrameCapture();
 
   // 断开 H.264 推流
   disconnectCameraH264();

@@ -20,6 +20,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 from config import load_config
+from pipeline.video_input import InputSource
 
 logger = logging.getLogger(__name__)
 
@@ -85,26 +86,6 @@ def _get_allowed_extensions() -> set[str]:
     return set(cfg.get("allowed_extensions", [".mp4", ".avi", ".mkv", ".mov", ".flv", ".wmv", ".webm"]))
 
 
-def _probe_camera_resolution(source: str) -> tuple[int, int] | None:
-    """快速探测摄像头/RTSP 分辨率，用于 H.264 编码器初始化。"""
-    import cv2
-    try:
-        cap_source = int(source) if source.isdigit() else source
-        cap = cv2.VideoCapture(cap_source)
-        if not cap.isOpened():
-            return None
-        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        if w <= 0 or h <= 0:
-            ret, frame = cap.read()
-            if ret and frame is not None:
-                h, w = frame.shape[:2]
-        cap.release()
-        return (w, h) if w > 0 and h > 0 else None
-    except Exception:
-        return None
-
-
 def _get_stream_dir(task_id: str) -> Path:
     """获取摄像头帧共享目录"""
     d = Path("./_camera_frames") / task_id
@@ -125,30 +106,6 @@ class PipelineStartRequest(BaseModel):
     detect_every: int = 2
     target_fps: float = 0
     capture_fps: int = 15  # 摄像头推帧帧率
-    pipe_scale: float = 0.5  # pipe 输出缩放系数 (0.1-1.0)
-    save_output_video: bool = True  # 是否保存推理结果视频
-    top_k: int = 3  # 语义检索候选数量
-    # ── 高级参数 ──
-    max_frames: int = 0
-    device: str = ""
-    yolo_model: str = ""
-    prompt_mode: str = "detailed"
-    enable_refresh: bool = True
-    skip_refresh_matched: bool = False
-    gap_num: int = 150
-    max_concurrent: int = 4
-
-
-class BrowserCameraStartRequest(BaseModel):
-    concurrent_mode: bool = True
-    stream_mode: str = "h264"  # 统一使用 h264 模式，与视频 Demo 一致
-    # ── 核心检测参数 ──
-    conf_threshold: float = 0.25
-    iou_threshold: float = 0.45
-    process_every: int = 15
-    detect_every: int = 2
-    target_fps: float = 0
-    capture_fps: int = 15  # 浏览器推帧帧率
     pipe_scale: float = 0.5  # pipe 输出缩放系数 (0.1-1.0)
     save_output_video: bool = True  # 是否保存推理结果视频
     top_k: int = 3  # 语义检索候选数量
@@ -617,7 +574,7 @@ async def start_pipeline(req: PipelineStartRequest):
     if is_camera:
         # 摄像头/RTSP：提前探测分辨率
         cam_source = video_source if not video_source.startswith("__camera__") else video_source.replace("__camera__", "")
-        detected = _probe_camera_resolution(cam_source)
+        detected = InputSource.probe_resolution(cam_source)
         if detected:
             video_w, video_h = detected
             logger.info("摄像头分辨率: %dx%d", video_w, video_h)
@@ -842,11 +799,9 @@ async def _wait_pipeline(task_id: str, process: asyncio.subprocess.Process, sem:
         async with _state_lock:
             _running_processes.pop(task_id, None)
             _stop_signals.discard(task_id)
-            is_browser_cam = _task_status.get(task_id, {}).get("is_browser_camera", False)
         _pipeline_logs.pop(task_id, None)
         _log_start.pop(task_id, None)
-        if not is_browser_cam:
-            _cleanup_stream_dir(task_id)
+        _cleanup_stream_dir(task_id)
         _cleanup_old_tasks()
 
 
@@ -919,15 +874,6 @@ async def stop_pipeline(task_id: str):
             return {"success": True, "message": f"任务正在停止中: {task_id}"}
         _stop_signals.add(task_id)
         process = _running_processes[task_id]
-
-    # 关闭 WebRTC PeerConnection（如果有）
-    pc = _webrtc_pcs.pop(task_id, None)
-    if pc:
-        try:
-            await pc.close()
-            logger.info("WebRTC PeerConnection 已关闭: %s", task_id)
-        except Exception:
-            pass
 
     # 写入停止信号文件（pipeline 可以检测到）
     stream_dir = _get_stream_dir(task_id)
@@ -1024,9 +970,6 @@ def _cleanup_stream_dir(task_id: str):
     if d.exists():
         shutil.rmtree(d, ignore_errors=True)
     # 同时清理浏览器帧目录
-    d2 = Path("./_browser_frames") / task_id
-    if d2.exists():
-        shutil.rmtree(d2, ignore_errors=True)
     # 清理内存帧队列
     _frame_queues.pop(task_id, None)
 
@@ -1069,12 +1012,6 @@ def _queue_put_latest(q: queue.Queue, item) -> None:
         except queue.Full:
             pass  # 极端情况：仍然满，丢弃此帧
 
-
-def _get_browser_frames_dir(task_id: str) -> Path:
-    """获取浏览器摄像头帧目录（仅作为 fallback）"""
-    d = Path("./_browser_frames") / task_id
-    d.mkdir(parents=True, exist_ok=True)
-    return d
 
 
 # ── H.264 推流管理 ──
@@ -1586,277 +1523,6 @@ async def camera_stream(task_id: str):
     )
 
 
-# ── 浏览器摄像头 ──
-
-@router.post("/start-browser-camera", response_model=PipelineStartResponse)
-async def start_browser_camera(req: BrowserCameraStartRequest):
-    """启动浏览器摄像头 Pipeline（简化版：与视频 Demo 相同的 H264 推流逻辑）
-
-    架构：
-    - 浏览器摄像头 → 服务端 Pipeline 处理 → H.264 编码 → WebSocket → 浏览器 MSE 播放
-    - 删除了 MJPEG/WebRTC 等冗余模式，统一使用 H264 推流
-    """
-    _ensure_dirs()
-
-    # 并发控制
-    sem = _get_semaphore()
-    running_count = sum(1 for t in _task_status.values() if t["status"] == "running")
-    if running_count >= _MAX_PARALLEL_PIPELINES:
-        raise HTTPException(
-            status_code=429,
-            detail=f"已有 {running_count} 个 Pipeline 在运行（上限 {_MAX_PARALLEL_PIPELINES}），请等待完成后再试",
-        )
-
-    config = load_config()
-    pipeline_cfg = config.get("pipeline", {})
-
-    task_id = str(uuid.uuid4())[:8]
-    stream_dir = _get_stream_dir(task_id)
-
-    # 创建内存帧队列（WebSocket 解码后直送 numpy 帧）
-    frame_queue: queue.Queue = queue.Queue(maxsize=30)
-    _frame_queues[task_id] = frame_queue
-
-    # 创建 pipe：pipeline 线程写 raw BGR → H.264 读取器读
-    pipe_r, pipe_w = os.pipe()
-
-    logger.info("启动浏览器摄像头 Pipeline (H264 模式, task=%s)", task_id)
-
-    async with _state_lock:
-        _task_status[task_id] = {
-            "task_id": task_id,
-            "status": "running",
-            "video_filename": f"浏览器摄像头 ({task_id})",
-            "output_filename": None,
-            "output_path": None,
-            "progress": "等待摄像头连接...",
-            "error": None,
-            "is_camera": True,
-            "is_browser_camera": True,
-            "stream_mode": "h264",  # 统一使用 H264 模式
-        }
-    _pipeline_logs[task_id] = []
-    _log_start[task_id] = 0
-
-    try:
-        await sem.acquire()
-
-        # ── H.264 编码器：从 pipe 读 raw BGR → ffmpeg → fMP4 ──
-        class _PipeReader:
-            """从 pipe fd 读取 raw bytes，给 asyncio 用"""
-            def __init__(self, fd: int):
-                self._fd = fd
-                self._loop = asyncio.get_event_loop()
-            async def readexactly(self, n: int) -> bytes:
-                return await self._loop.run_in_executor(None, self._blocking_read, n)
-            def _blocking_read(self, n: int) -> bytes:
-                buf = b""
-                while len(buf) < n:
-                    chunk = os.read(self._fd, n - len(buf))
-                    if not chunk:
-                        break
-                    buf += chunk
-                return buf if len(buf) == n else b""
-
-        class _NullStderr:
-            """模拟 process.stderr，pipeline 完成前阻塞"""
-            def __init__(self):
-                self._done = threading.Event()
-            async def readline(self) -> bytes:
-                loop = asyncio.get_event_loop()
-                await loop.run_in_executor(None, self._done.wait, 300)
-                return b""
-            def signal_done(self):
-                self._done.set()
-
-        class _FakeProcess:
-            """模拟 asyncio.subprocess.Process 接口"""
-            def __init__(self, pipe_fd: int):
-                self.stdout = _PipeReader(pipe_fd)
-                self.stderr = _NullStderr()
-                self.returncode = None
-                self.pid = -1  # 标记非真实进程
-                self._finished = asyncio.Event()
-            async def wait(self):
-                await self._finished.wait()
-            def kill(self):
-                self._finished.set()
-                try:
-                    os.close(pipe_r)
-                except OSError:
-                    pass
-
-        fake_proc = _FakeProcess(pipe_r)
-        cam_fps = int(req.target_fps) if req.target_fps > 0 else 15
-        # pipe 输出缩放
-        if 0.1 <= req.pipe_scale < 1.0:
-            pipe_out_w = max(16, int(640 * req.pipe_scale))
-            pipe_out_h = max(16, int(480 * req.pipe_scale))
-        else:
-            pipe_out_w, pipe_out_h = 640, 480
-        asyncio.create_task(_start_h264_reader(task_id, fake_proc, pipe_out_w, pipe_out_h, fps=cam_fps))
-
-        # ── Pipeline 线程 ──
-        pipe_cfg = dict(pipeline_cfg)
-        pipe_cfg.update({
-            "concurrent_mode": req.concurrent_mode,
-            "conf_threshold": req.conf_threshold,
-            "iou_threshold": req.iou_threshold,
-            "process_every_n_frames": req.process_every,
-            "detect_every_n_frames": req.detect_every,
-            "target_fps": req.target_fps,
-            "max_concurrent": req.max_concurrent or pipeline_cfg.get("max_concurrent", 4),
-            "demo": True,
-            "no_output": not req.save_output_video,
-            "save_output_video": req.save_output_video,
-            "save_screenshots": False,
-            "raw_stdout": True,
-            "output_size": [640, 480],
-            "stop_file": str(stream_dir / "__STOP__"),
-        })
-        # 更新检索参数
-        if "retrieval" not in config:
-            config["retrieval"] = {}
-        config["retrieval"]["top_k"] = req.top_k
-        if 0.1 <= req.pipe_scale < 1.0:
-            pipe_cfg["pipe_output_size"] = [pipe_out_w, pipe_out_h]
-        if req.max_frames > 0:
-            pipe_cfg["max_frames"] = req.max_frames
-        if req.device:
-            pipe_cfg["device"] = req.device
-        if req.yolo_model:
-            pipe_cfg["yolo_model"] = req.yolo_model
-        if req.prompt_mode:
-            pipe_cfg["prompt_mode"] = req.prompt_mode
-        if req.enable_refresh:
-            pipe_cfg["enable_refresh"] = True
-            pipe_cfg["gap_num"] = req.gap_num
-        pipe_cfg["skip_refresh_matched"] = req.skip_refresh_matched
-        config["pipeline"] = pipe_cfg
-
-        def _run_pipeline():
-            """在独立线程中运行 pipeline，stdout fd 重定向到 pipe"""
-            import cv2
-            from pipeline.pipeline import ShipPipeline
-            from pipeline.virtual_camera import VirtualCamera
-
-            # fd 重定向：把 stdout (fd=1) 指向 pipe_w
-            # 这样 pipeline 的 open("/dev/stdout","wb") 写入的数据全部进入 pipe
-            saved_stdout_fd = os.dup(1)
-            os.dup2(pipe_w, 1)
-
-            try:
-                vc = VirtualCamera(frame_queue=frame_queue, fps=15.0)
-                pipeline = ShipPipeline(config=config)
-                stats = pipeline.process(source=vc, display=False, max_frames=req.max_frames)
-
-                # 输出摘要到 stderr（不经过 fd 1）
-                summary_json = json.dumps(stats, ensure_ascii=False)
-                os.write(saved_stdout_fd, f"\n__PIPELINE_SUMMARY__:{summary_json}\n".encode())
-
-            except Exception as e:
-                logger.error("Pipeline 线程异常: %s", e)
-                import traceback
-                traceback.print_exc()
-                stats = {"error": str(e)}
-            finally:
-                # 恢复 stdout fd
-                os.dup2(saved_stdout_fd, 1)
-                os.close(saved_stdout_fd)
-                os.close(pipe_w)
-
-            # 通知主循环完成（线程中无 event loop，需用主循环引用）
-            async def _finish():
-                async with _state_lock:
-                    if "error" in stats:
-                        _task_status[task_id]["status"] = "failed"
-                        _task_status[task_id]["error"] = stats["error"]
-                    else:
-                        _task_status[task_id]["status"] = "completed"
-                        _task_status[task_id]["progress"] = "处理完成"
-                await _stop_h264_stream(task_id)
-                fake_proc.stderr.signal_done()
-                fake_proc._finished.set()
-                sem.release()
-                _pipeline_logs.pop(task_id, None)
-                _log_start.pop(task_id, None)
-                _cleanup_stream_dir(task_id)
-
-            asyncio.run_coroutine_threadsafe(_finish(), _main_loop)
-
-        # 捕获主循环引用，供线程内使用
-        _main_loop = asyncio.get_event_loop()
-
-        thread = threading.Thread(target=_run_pipeline, name=f"pipeline-{task_id}", daemon=True)
-        thread.start()
-
-    except Exception as e:
-        sem.release()
-        try:
-            fake_proc._finished.set()
-        except Exception:
-            pass
-        os.close(pipe_r)
-        os.close(pipe_w)
-        _frame_queues.pop(task_id, None)
-        async with _state_lock:
-            _task_status[task_id]["status"] = "failed"
-            _task_status[task_id]["error"] = str(e)
-        raise HTTPException(status_code=500, detail=str(e))
-
-    return PipelineStartResponse(
-        success=True,
-        message=f"浏览器摄像头 Pipeline 已启动 (H264 模式)，请连接 WebSocket 推流",
-        task_id=task_id,
-        capture_fps=req.capture_fps,
-    )
-
-
-@router.websocket("/ws/camera/{task_id}")
-async def browser_camera_ws(websocket: WebSocket, task_id: str):
-    """WebSocket 端点 — 接收浏览器摄像头视频流（简化版：统一使用 H264 模式）"""
-    async with _state_lock:
-        if task_id not in _task_status:
-            await websocket.close(code=4004, reason="任务不存在")
-            return
-
-    await websocket.accept()
-    logger.info("浏览器摄像头 WebSocket 已连接: %s", task_id)
-
-    # 获取内存队列（pipeline 线程直接消费）
-    frame_queue = _frame_queues.get(task_id)
-    use_queue = frame_queue is not None
-
-    # fallback：无队列时写磁盘
-    frames_dir = _get_browser_frames_dir(task_id) if not use_queue else None
-
-    async with _state_lock:
-        _task_status[task_id]["progress"] = "摄像头已连接，等待推流..."
-
-    # ── 统一使用 H264 模式（与视频 Demo 一致）──
-    try:
-        first_msg = await asyncio.wait_for(websocket.receive(), timeout=10.0)
-    except asyncio.TimeoutError:
-        logger.warning("摄像头 WebSocket 10秒内无数据: %s", task_id)
-        await websocket.close(code=4008, reason="超时")
-        return
-
-    # 统一解析为 H264 模式
-    if "text" in first_msg:
-        try:
-            cfg = json.loads(first_msg["text"])
-            codec = cfg.get("codec", "h264")
-        except (json.JSONDecodeError, KeyError):
-            codec = "h264"
-    else:
-        codec = "h264"
-
-    logger.info("摄像头 H264 模式: codec=%s, task=%s", codec, task_id)
-    await _receive_h264_camera_frames(
-        websocket, task_id, frame_queue, use_queue, frames_dir, codec
-    )
-
-
 async def _receive_mjpeg_camera_frames(
     websocket: WebSocket, task_id: str,
     frame_queue: queue.Queue | None, use_queue: bool,
@@ -1865,79 +1531,6 @@ async def _receive_mjpeg_camera_frames(
     """MJPEG 模式：已废弃，保留空实现"""
     logger.warning("MJPEG 模式已废弃，task=%s", task_id)
     await websocket.close(code=4001, reason="MJPEG 模式已废弃，请使用 H264 模式")
-
-
-# ── WebRTC 摄像头（已废弃，保留空实现）──
-
-# 每个 task 对应一个 PeerConnection，停止时需要关闭
-_webrtc_pcs: dict[str, Any] = {}
-# 用于同步 pipeline 线程等待 WebRTC track 就绪
-_webrtc_ready_events: dict[str, threading.Event] = {}
-
-
-async def _receive_webrtc_camera_frames(
-    pc: Any,
-    task_id: str,
-    frame_queue: queue.Queue | None,
-    use_queue: bool,
-    frames_dir: Path | None,
-    video_track=None,
-):
-    """WebRTC 模式：已废弃，保留空实现"""
-    logger.warning("WebRTC 模式已废弃，task=%s", task_id)
-    try:
-        await asyncio.wait_for(pc.close(), timeout=3.0)
-    except Exception:
-        pass
-
-
-class WebRTCOfferRequest(BaseModel):
-    sdp: str
-    type: str = "offer"
-
-
-# 服务端 STUN 探索：让 aioice Connection 默认使用 Google STUN 获取 srflx 公网候选
-_PATCHED_AIOICE_STUN = False
-
-def _patch_aioice_stun():
-    global _PATCHED_AIOICE_STUN
-    if _PATCHED_AIOICE_STUN:
-        return
-    try:
-        import aioice.ice
-        orig_init = aioice.ice.Connection.__init__
-        def _patched_init(self, *args, **kwargs):
-            if 'stun_server' not in kwargs or kwargs['stun_server'] is None:
-                kwargs['stun_server'] = ('218.106.147.53', 3478)
-            orig_init(self, *args, **kwargs)
-        aioice.ice.Connection.__init__ = _patched_init
-        _PATCHED_AIOICE_STUN = True
-        logger.info("aioice STUN 已启用: 218.106.147.53:3478")
-    except ImportError:
-        logger.warning("无法导入 aioice，跳过 STUN 补丁")
-
-
-@router.post("/webrtc/offer/{task_id}")
-async def webrtc_offer(task_id: str, req: WebRTCOfferRequest, request: Request):
-    """WebRTC 信令端点：已废弃，返回错误提示使用 H264 模式"""
-    logger.warning("WebRTC 信令端点已废弃，task=%s", task_id)
-    raise HTTPException(
-        status_code=400,
-        detail="WebRTC 模式已废弃，请使用 H264 模式（默认）"
-    )
-
-
-class WebRTCCandidateRequest(BaseModel):
-    candidate: str | None
-    sdpMid: str | None
-    sdpMLineIndex: int | None
-
-
-@router.post("/webrtc/candidate/{task_id}")
-async def webrtc_candidate(task_id: str, req: WebRTCCandidateRequest):
-    """WebRTC candidate 端点：已废弃，返回空响应"""
-    logger.debug("WebRTC candidate 端点已废弃，task=%s", task_id)
-    return {"ok": True}
 
 
 async def _receive_h264_camera_frames(
