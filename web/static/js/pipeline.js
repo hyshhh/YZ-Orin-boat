@@ -1,7 +1,7 @@
 /**
  * Pipeline 前端逻辑 — 视频 Demo / 摄像头 Demo
  *
- * 视频 Demo：后端推理，实时 MJPEG 推流到前端，不保存输出视频
+ * 视频 Demo：后端推理，实时 H264 推流到前端，不保存输出视频
  * 摄像头 Demo：浏览器/服务器摄像头，实时推流识别
  */
 
@@ -270,7 +270,7 @@ function collectCameraParams() {
     skip_refresh_matched: document.getElementById('camSkipRefreshMatched').checked,
     gap_num: parseInt(document.getElementById('camGapNum').value, 10) || 150,
     max_concurrent: parseInt(document.getElementById('camMaxConcurrent').value, 10) || 4,
-    stream_mode: (document.getElementById('camStreamMode') || {}).value || 'mjpeg',
+    stream_mode: (document.getElementById('camStreamMode') || {}).value || 'h264',
   };
 }
 
